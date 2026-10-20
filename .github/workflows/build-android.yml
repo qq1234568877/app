@@ -1,4 +1,3 @@
-# 纯 WebView 壳（Capacitor 7 仅生成工程，无 Cordova）：workflow_dispatch → 签名 APK
 name: Build Android
 
 on:
@@ -82,7 +81,7 @@ permissions:
 
 jobs:
   build:
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
 
@@ -90,7 +89,7 @@ jobs:
         with:
           node-version: '20'
 
-      - uses: actions/setup-java@v4
+      - uses: actions/setup-java@v5
         with:
           distribution: temurin
           java-version: '17'
@@ -205,116 +204,53 @@ jobs:
         working-directory: android
         env:
           KEYSTORE_PATH: ${{ github.workspace }}/release.p12
-          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_STORE_PASSWORD }}
-          KEY_ALIAS: ${{ secrets.ANDROID_KEY_ALIAS }}
-          KEY_PASSWORD: ${{ secrets.ANDROID_KEY_PASSWORD }}
+          KEYSTORE_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_PASSWORD }}
+          KEYSTORE_ALIAS: ${{ secrets.ANDROID_KEYSTORE_ALIAS }}
+          KEYSTORE_ALIAS_PASSWORD: ${{ secrets.ANDROID_KEYSTORE_ALIAS_PASSWORD }}
         run: |
-          test -f ./gradlew || (echo "::error::android/gradlew missing — cap add android failed" && exit 1)
-          chmod +x ./gradlew
-          GRADLE_ARGS=(
-            clean assembleRelease --no-daemon
-            "-Pandroid.injected.signing.store.file=$KEYSTORE_PATH"
-            "-Pandroid.injected.signing.store.type=pkcs12"
-            "-Pandroid.injected.signing.store.password=$KEYSTORE_PASSWORD"
-            "-Pandroid.injected.signing.key.alias=$KEY_ALIAS"
-            "-Pandroid.injected.signing.key.password=$KEY_PASSWORD"
-          )
-          for attempt in 1 2 3 4 5; do
-            echo "Gradle attempt $attempt"
-            if ./gradlew "${GRADLE_ARGS[@]}"; then
-              exit 0
-            fi
-            echo "Gradle failed, retry in 20s..."
-            sleep 20
-          done
-          echo "::error::Gradle assembleRelease failed after 5 attempts"
-          exit 1
+          ./gradlew assembleRelease
+          ls -la app/build/outputs/apk/release/
 
-      - name: Collect APK
-        id: apk
-        env:
-          FIX_APK: ${{ inputs.fix_apk }}
-          SIGN_V1: ${{ inputs.sign_v1 }}
-          SIGN_V2: ${{ inputs.sign_v2 }}
-          SIGN_V3: ${{ inputs.sign_v3 }}
-          VERIFY_APK: ${{ inputs.verify_apk }}
+      - name: Fix APK installable
+        if: inputs.fix_apk == 'true'
         run: |
-          APK=$(find android/app/build/outputs/apk/release -name '*.apk' | head -1)
-          if [ -z "$APK" ]; then
-            echo "::error::No APK found under android/app/build/outputs/apk/release"
-            exit 1
-          fi
-          echo "path=$APK" >> "$GITHUB_OUTPUT"
-          echo "name=$(basename "$APK")" >> "$GITHUB_OUTPUT"
-          ls -la "$APK"
-          WORK="$APK"
-          if [ "$FIX_APK" = "true" ]; then
-            python3 scripts/fix-apk-installable.py "$APK" "$APK.pack-fixed"
-            WORK="$APK.pack-fixed"
-          fi
-          NEED_RESIGN=false
-          if [ "$SIGN_V1" = "true" ] || [ "$SIGN_V2" = "true" ] || [ "$SIGN_V3" = "true" ]; then
-            NEED_RESIGN=true
-          fi
-          if [ "$NEED_RESIGN" = "true" ]; then
-            BT="$(ls -d "$ANDROID_HOME"/build-tools/* 2>/dev/null | sort -V | tail -1)"
-            test -n "$BT" || (echo "::error::Android build-tools not found" && exit 1)
-            "$BT/zipalign" -p -f 4 "$WORK" "$APK.aligned"
-            V1_FLAG="true"
-            V2_FLAG="false"; V3_FLAG="false"
-            [ "$SIGN_V1" = "true" ] && V1_FLAG="true"
-            [ "$SIGN_V2" = "true" ] && V2_FLAG="true"
-            [ "$SIGN_V3" = "true" ] && V3_FLAG="true"
-            "$BT/apksigner" sign \
-              --ks "${{ github.workspace }}/release.p12" \
-              --ks-type pkcs12 \
-              --ks-key-alias "${{ secrets.ANDROID_KEY_ALIAS }}" \
-              --ks-pass "pass:${{ secrets.ANDROID_STORE_PASSWORD }}" \
-              --key-pass "pass:${{ secrets.ANDROID_KEY_PASSWORD }}" \
-              --v1-signing-enabled "$V1_FLAG" \
-              --v2-signing-enabled "$V2_FLAG" \
-              --v3-signing-enabled "$V3_FLAG" \
-              --out "$APK" "$APK.aligned"
-            rm -f "$APK.pack-fixed" "$APK.aligned"
-            "$BT/apksigner" verify --min-sdk-version 24 --verbose "$APK" || {
-              echo "::error::apksigner verify failed after sign"
-              exit 1
-            }
-          elif [ "$WORK" != "$APK" ]; then
-            cp -f "$WORK" "$APK"
-            rm -f "$APK.pack-fixed"
-          fi
-          FINAL_SIZE=$(stat -c%s "$APK")
-          if [ "$VERIFY_APK" = "true" ]; then
-            node scripts/verify-apk-installable.mjs "$APK"
-            node scripts/verify-apk-sdk.mjs "$APK"
-          fi
-          echo "packaging: target_sdk=${{ inputs.target_sdk }} fix=$FIX_APK sign_v1=$SIGN_V1 sign_v2=$SIGN_V2 sign_v3=$SIGN_V3"
-          echo "final_size=$FINAL_SIZE" >> "$GITHUB_OUTPUT"
-          echo "size=$FINAL_SIZE" >> "$GITHUB_OUTPUT"
+          python3 scripts/fix-apk-installable.py app/build/outputs/apk/release/app-release-unsigned.apk
+          mv app/build/outputs/apk/release/app-release-unsigned.apk app/build/outputs/apk/release/app-release-fixed.apk
 
-      - name: Create Release
-        id: rel
-        uses: softprops/action-gh-release@v2
+      - name: Zipalign & Sign APK
+        run: |
+          if [ "${{ inputs.fix_apk }}" = "true" ]; then
+            IN_APK="app/build/outputs/apk/release/app-release-fixed.apk"
+          else
+            IN_APK="app/build/outputs/apk/release/app-release-unsigned.apk"
+          fi
+          OUT_APK="app/build/outputs/apk/release/app-release-signed.apk"
+          zipalign -v 4 "$IN_APK" "$OUT_APK"
+          apksigner sign \
+            --ks ${{ github.workspace }}/release.p12 \
+            --ks-pass pass:${{ secrets.ANDROID_KEYSTORE_PASSWORD }} \
+            --key-pass pass:${{ secrets.ANDROID_KEYSTORE_ALIAS_PASSWORD }} \
+            --ks-key-alias ${{ secrets.ANDROID_KEYSTORE_ALIAS }} \
+            --v1-signing-enabled ${{ inputs.sign_v1 }} \
+            --v2-signing-enabled ${{ inputs.sign_v2 }} \
+            --v3-signing-enabled ${{ inputs.sign_v3 }} \
+            "$OUT_APK"
+
+      - name: Verify APK
+        if: inputs.verify_apk == 'true'
+        run: node scripts/verify-apk-installable.mjs app/build/outputs/apk/release/app-release-signed.apk
+
+      - name: Upload APK artifact
+        uses: actions/upload-artifact@v4
         with:
-          tag_name: android-v${{ inputs.version_name }}-${{ github.run_number }}
-          name: Android v${{ inputs.version_name }} (run ${{ github.run_number }})
-          files: ${{ steps.apk.outputs.path }}
-          prerelease: false
-        env:
-          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          name: app-release-signed.apk
+          path: android/app/build/outputs/apk/release/app-release-signed.apk
 
-      - name: Upload APK to platform (public download)
-        if: success() && inputs.callback_token != ''
-        env:
-          PLATFORM_URL: ${{ inputs.platform_url }}
-          CALLBACK_TOKEN: ${{ inputs.callback_token }}
-          BUILD_ID: ${{ inputs.build_id }}
-          BUILD_PLATFORM: android
-          VERSION_NAME: ${{ inputs.version_name }}
-          RELEASE_TAG: android-v${{ inputs.version_name }}-${{ github.run_number }}
-          APK_PATH: ${{ steps.apk.outputs.path }}
-        run: node scripts/upload-apk-to-platform.mjs || echo "platform upload failed (non-fatal, use GitHub Release)"
+      - name: Get APK file size
+        id: apk
+        run: |
+          FILE_SIZE=$(stat -c%s android/app/build/outputs/apk/release/app-release-signed.apk)
+          echo "size=$FILE_SIZE" >> $GITHUB_OUTPUT
 
       - name: Notify platform (success)
         if: success()
@@ -324,8 +260,6 @@ jobs:
           BUILD_ID: ${{ inputs.build_id }}
           BUILD_PLATFORM: android
           BUILD_STATUS: success
-          RELEASE_TAG: android-v${{ inputs.version_name }}-${{ github.run_number }}
-          DOWNLOAD_URL: https://github.com/${{ github.repository }}/releases/download/android-v${{ inputs.version_name }}-${{ github.run_number }}/${{ steps.apk.outputs.name }}
           FILE_SIZE_BYTES: ${{ steps.apk.outputs.size }}
         run: node scripts/notify-platform.mjs || true
 
