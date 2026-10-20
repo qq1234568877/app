@@ -1,1 +1,11 @@
+{
+  "name": "webview‑shell",
+  "version": "1.0.0",
+  "description": "Capacitor WebView shell",
+  "dependencies": {
+    "@capacitor/android": "^7.0.0",
+    "@capacitor/core": "^7.0.0"
+  },
+  "devDependencies": {}
+}
 
